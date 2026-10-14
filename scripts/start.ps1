@@ -1,4 +1,7 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 try {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -40,8 +43,20 @@ function Invoke-Checked {
         [Parameter(Mandatory = $true)][string]$FailureMessage
     )
 
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
+    $previousPreference = $ErrorActionPreference
+    $exitCode = 1
+    try {
+        # Windows PowerShell 5.1, yerel uygulamaların stderr çıktısını bazen
+        # sonlandırıcı hata sayar. Çıktıyı eksiksiz gösterip kodu kendimiz denetle.
+        $ErrorActionPreference = "Continue"
+        & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    if ($exitCode -ne 0) {
         Stop-WithError $FailureMessage
     }
 }
@@ -75,6 +90,20 @@ function Install-WithWinget {
         "--accept-package-agreements", "--accept-source-agreements"
     ) -FailureMessage "$DisplayName winget ile kurulamadı. Windows Paket Yöneticisi çıktısını kontrol edin."
     Update-ProcessPath
+}
+
+function Get-OrInstallUv {
+    $uvCommand = Get-Command "uv.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $uvCommand) {
+        Install-WithWinget -DisplayName "uv Python yöneticisi" -PackageId "astral-sh.uv"
+        $uvCommand = Get-Command "uv.exe" -ErrorAction SilentlyContinue
+    }
+
+    if ($null -eq $uvCommand) {
+        Stop-WithError "uv kuruldu ancak bu terminal tarafından henüz görülemiyor. Pencereyi kapatıp BASLAT-WINDOWS.bat dosyasına yeniden çift tıklayın."
+    }
+
+    return $uvCommand.Source
 }
 
 function Import-DotEnv {
@@ -119,40 +148,22 @@ function Import-DotEnv {
     }
 }
 
-function Get-PythonLauncher {
-    $pyCommand = Get-Command "py.exe" -ErrorAction SilentlyContinue
-    if ($null -ne $pyCommand) {
-        & $pyCommand.Source -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            return [PSCustomObject]@{
-                FilePath = $pyCommand.Source
-                Prefix = @("-3")
-            }
-        }
-    }
-
-    $pythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
-    if ($null -ne $pythonCommand) {
-        & $pythonCommand.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            return [PSCustomObject]@{
-                FilePath = $pythonCommand.Source
-                Prefix = @()
-            }
-        }
-    }
-
-    return $null
-}
-
 function Test-PythonImports {
     param(
         [string]$PythonPath,
         [string]$ImportCode
     )
 
-    & $PythonPath -c $ImportCode *> $null
-    return ($LASTEXITCODE -eq 0)
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "SilentlyContinue"
+        & $PythonPath -c $ImportCode *> $null
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return ($exitCode -eq 0)
 }
 
 function Test-KlipForgeHealth {
@@ -207,18 +218,27 @@ try {
     }
 
     $didCreateEnvironment = $false
-    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        Write-Step "İlk kurulum: Python sanal ortamı hazırlanıyor"
-        $pythonLauncher = Get-PythonLauncher
-        if ($null -eq $pythonLauncher) {
-            Install-WithWinget -DisplayName "Python 3.12" -PackageId "Python.Python.3.12"
-            $pythonLauncher = Get-PythonLauncher
+    $environmentHealthy = $false
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        $hasSupportedPython = Test-PythonImports -PythonPath $venvPython -ImportCode "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 12) else 1)"
+        $hasPip = Test-PythonImports -PythonPath $venvPython -ImportCode "import pip"
+        $environmentHealthy = $hasSupportedPython -and $hasPip
+    }
+
+    if (-not $environmentHealthy) {
+        Write-Step "İlk kurulum: Python 3.12 sanal ortamı hazırlanıyor"
+
+        if (Test-Path -LiteralPath $venvDirectory) {
+            if (-not [string]::IsNullOrWhiteSpace($venvSetting)) {
+                Stop-WithError "KLIPFORGE_VENV_DIR ile belirtilen sanal ortam eksik veya bozuk: $venvDirectory. Klasörü düzeltin ya da .env içindeki KLIPFORGE_VENV_DIR satırını kaldırın."
+            }
+            $failedEnvironment = "$venvDirectory-hatali-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+            Move-Item -LiteralPath $venvDirectory -Destination $failedEnvironment
+            Write-Host "Önceki yarım sanal ortam yedeklendi: $failedEnvironment" -ForegroundColor Yellow
         }
-        if ($null -eq $pythonLauncher) {
-            Stop-WithError "Python kuruldu ancak bu terminal tarafından henüz görülemiyor. Pencereyi kapatıp BASLAT-WINDOWS.bat dosyasına yeniden çift tıklayın."
-        }
-        $venvArguments = @($pythonLauncher.Prefix) + @("-m", "venv", $venvDirectory)
-        Invoke-Checked -FilePath $pythonLauncher.FilePath -Arguments $venvArguments -FailureMessage "Python sanal ortamı oluşturulamadı. Python kurulumunda venv bileşeninin bulunduğunu doğrulayın."
+
+        $uvPath = Get-OrInstallUv
+        Invoke-Checked -FilePath $uvPath -Arguments @("venv", "--seed", "--python", "3.12", $venvDirectory) -FailureMessage "Python 3.12 sanal ortamı uv ile oluşturulamadı. Yukarıdaki ayrıntılı çıktıyı kontrol edin."
         $didCreateEnvironment = $true
     }
 
@@ -226,9 +246,8 @@ try {
         Stop-WithError "Sanal ortam Python dosyası bulunamadı: $venvPython"
     }
 
-    & $venvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Stop-WithError "Mevcut .venv Python 3.11 veya üstünü kullanmıyor. .venv klasörünü silip başlatıcıyı yeniden çalıştırın."
+    if (-not (Test-PythonImports -PythonPath $venvPython -ImportCode "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] <= (3, 12) else 1)")) {
+        Stop-WithError "Hazırlanan .venv desteklenen Python 3.11/3.12 sürümünü kullanmıyor."
     }
 
     $runtimeReady = Test-PythonImports -PythonPath $venvPython -ImportCode "import fastapi, uvicorn, multipart, numpy"

@@ -62,7 +62,7 @@ Docker kullanılmaz ve gerekli değildir.
 2. Çıkan `klipforge-local` klasöründeki `BASLAT-WINDOWS.bat` dosyasına çift tıklayın.
 3. İlk kurulum tamamlanınca tarayıcı otomatik açılır. Siyah terminal penceresini uygulamayı kullandığınız sürece açık bırakın.
 
-Windows başlatıcısı hazır arayüzü kullandığı için Node.js istemez. Python 3.11+ veya FFmpeg eksikse, `winget` ile otomatik kurmak için onay ister ve hata olursa pencereyi kapatmadan açıklamasını gösterir. FFmpeg elle kurulmak istenirse yönetici PowerShell'de şu komut kullanılabilir:
+Windows başlatıcısı hazır arayüzü kullandığı için Node.js istemez. Python ortamını `uv` ile doğrulanmış Python 3.12 üzerinde hazırlar; Python/uv veya FFmpeg eksikse `winget` ile otomatik kurmak için onay ister. Yarım kalmış `.venv` klasörünü silmek yerine zaman damgalı bir yedek adına taşır ve hata olursa pencereyi kapatmadan ayrıntılı çıktıyı gösterir. FFmpeg elle kurulmak istenirse yönetici PowerShell'de şu komut kullanılabilir:
 
 ```powershell
 winget install --id Gyan.FFmpeg -e
